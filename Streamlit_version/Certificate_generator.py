@@ -41,6 +41,8 @@ if 'errors' not in st.session_state:
     st.session_state.errors = []
 if 'last_drag_update' not in st.session_state:
     st.session_state.last_drag_update = time.time()
+if 'component_value' not in st.session_state:
+    st.session_state.component_value = None
 
 # Function to validate email
 def is_valid_email(email):
@@ -125,6 +127,7 @@ with tabs[0]:
                         st.warning("No headers found in Excel file. Please check your data.")
                     else:
                         st.session_state.excel_headers = headers
+                        st.session_state.excel_file = excel_file
                         
                         # Show Excel preview
                         preview_data = []
@@ -405,25 +408,37 @@ with tabs[1]:
                                 const centerX = boundedX + (parseInt(elem.style.width) || 50) / 2;
                                 const centerY = boundedY + (parseInt(elem.style.height) || 20) / 2;
                                 
-                                // Update hidden form field
                                 const xPos = Math.round((centerX / container.offsetWidth) * 100);
                                 const yPos = Math.round((centerY / container.offsetHeight) * 100);
                                 
-                                // Send data to Streamlit using component communication
-                                if (window.Streamlit) {{
-                                    const data = {{
-                                        elementId: el.id,
-                                        xPos: xPos,
-                                        yPos: yPos
-                                    }};
-                                    window.Streamlit.setComponentValue(JSON.stringify(data));
-                                }}
+                                // Send position update as a window variable
+                                window.dragUpdate = JSON.stringify({{
+                                    elementId: el.id,
+                                    xPos: xPos,
+                                    yPos: yPos
+                                }});
                             }});
                             
                             document.addEventListener('mouseup', function() {{
                                 if (isDragging) {{
                                     isDragging = false;
                                     elem.style.zIndex = 'auto';
+                                    
+                                    // Create invisible button to trigger rerun
+                                    if (window.dragUpdate) {{
+                                        const updateForm = document.createElement('form');
+                                        updateForm.method = 'POST';
+                                        updateForm.style.display = 'none';
+                                        
+                                        const input = document.createElement('input');
+                                        input.type = 'hidden';
+                                        input.name = 'drag_update';
+                                        input.value = window.dragUpdate;
+                                        
+                                        updateForm.appendChild(input);
+                                        document.body.appendChild(updateForm);
+                                        updateForm.submit();
+                                    }}
                                 }}
                             }});
                         }});
@@ -431,31 +446,25 @@ with tabs[1]:
                     </script>
                     """
                     
-                    # Use a component to handle the drag events
-                    component_value = st.components.v1.html(canvas_html, height=600)
+                    st.components.v1.html(canvas_html, height=600)
                     
-                    # Process drag updates
-                    if component_value:
+                    # Handle drag updates from form submission
+                    drag_update = st.experimental_get_query_params().get('drag_update', [None])[0]
+                    
+                    if drag_update:
                         try:
-                            data = json.loads(component_value)
+                            data = json.loads(drag_update)
+                            
                             # Update position in session state
                             for i, element in enumerate(st.session_state.text_elements):
                                 if element['id'] == data['elementId']:
-                                    # Update percentages and actual coordinates
                                     element['x_pos'] = data['xPos']
                                     element['y_pos'] = data['yPos']
                                     element['actual_x'] = int(st.session_state.template_size[0] * data['xPos'] / 100)
                                     element['actual_y'] = int(st.session_state.template_size[1] * data['yPos'] / 100)
-                                    break
-                            
-                            # Prevent too many reruns by limiting the update frequency
-                            current_time = time.time()
-                            if current_time - st.session_state.last_drag_update > 1.0:
-                                st.session_state.last_drag_update = current_time
-                                st.experimental_rerun()
-                                
-                        except json.JSONDecodeError:
-                            pass
+                                    st.experimental_rerun()
+                        except Exception as e:
+                            st.session_state.errors.append(f"Error processing drag update: {str(e)}")
                         
                 except Exception as e:
                     error_msg = f"Error generating preview: {str(e)}"
@@ -686,50 +695,33 @@ Certificate Team"""
                                     # Send email
                                     server.sendmail(st.session_state.sender_email, test_email, msg.as_string())
                                     
-                                    st.success(f"✅ Test email sent to {test_email}!")
+                                    st.success(f"✅ Test email sent to {test_email}")
                             except smtplib.SMTPAuthenticationError:
-                                st.error("Authentication failed. Please check your email and app password.")
-                                st.info("If using Gmail, ensure you've set up an App Password: [Learn how](https://support.google.com/accounts/answer/185833)")
-                            except smtplib.SMTPRecipientsRefused:
-                                st.error(f"Email {test_email} was refused by the server. Please check the address.")
-                            except smtplib.SMTPException as e:
-                                st.error(f"SMTP error: {str(e)}")
-                            except FileNotFoundError:
-                                st.error("Certificate file not found. Please generate certificates again.")
+                                st.error("Email authentication failed. Check your email and app password.")
                             except Exception as e:
-                                st.error(f"Error sending test email: {str(e)}")
+                                error_msg = f"Error sending test email: {str(e)}"
+                                st.session_state.errors.append(error_msg)
+                                st.error(error_msg)
                 
                 if send_all:
                     if not st.session_state.certificate_files:
-                        st.error("No certificates with valid email addresses were found.")
+                        st.error("No certificates with valid emails found")
                     else:
-                        with st.spinner("Sending emails..."):
+                        with st.spinner(f"Sending emails to {len(st.session_state.certificate_files)} recipients..."):
                             try:
                                 # Set up server
                                 context = ssl.create_default_context()
                                 with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
                                     server.login(st.session_state.sender_email, st.session_state.email_password)
                                     
-                                    # Track progress
-                                    sent_count = 0
-                                    failed_emails = []
-                                    
                                     # Progress bar
                                     progress_bar = st.progress(0)
                                     total_emails = len(st.session_state.certificate_files)
+                                    success_count = 0
                                     
                                     # Send each email
                                     for i, (email, cert_path) in enumerate(st.session_state.certificate_files.items()):
-                                        # Update progress
-                                        progress_percent = min(int(i / total_emails * 100), 100)
-                                        progress_bar.progress(progress_percent)
-                                        
                                         try:
-                                            # Check if file exists
-                                            if not os.path.exists(cert_path):
-                                                failed_emails.append(f"{email} (certificate file missing)")
-                                                continue
-                                                
                                             # Create message
                                             msg = MIMEMultipart()
                                             msg['From'] = st.session_state.sender_email
@@ -747,59 +739,71 @@ Certificate Team"""
                                             
                                             # Send email
                                             server.sendmail(st.session_state.sender_email, email, msg.as_string())
-                                            sent_count += 1
-                                            
+                                            success_count += 1
                                         except Exception as e:
-                                            failed_emails.append(f"{email} ({str(e)})")
+                                            st.session_state.errors.append(f"Error sending to {email}: {str(e)}")
+                                        
+                                        # Update progress
+                                        progress_percent = min(int((i+1) / total_emails * 100), 100)
+                                        progress_bar.progress(progress_percent)
                                     
                                     # Complete the progress bar
                                     progress_bar.progress(100)
                                     
-                                    # Report results
-                                    if failed_emails:
-                                        st.warning(f"✅ Successfully sent {sent_count} emails, with {len(failed_emails)} failures.")
-                                        with st.expander("Show failed emails"):
-                                            for email in failed_emails:
-                                                st.write(f"- {email}")
-                                    else:
-                                        st.success(f"✅ Successfully sent all {sent_count} emails!")
+                                    if success_count > 0:
+                                        st.success(f"✅ Successfully sent {success_count} out of {total_emails} emails!")
+                                    if success_count < total_emails:
+                                        st.warning(f"⚠️ Failed to send {total_emails - success_count} emails. See error log for details.")
                             
                             except smtplib.SMTPAuthenticationError:
-                                st.error("Authentication failed. Please check your email and app password.")
-                                st.info("If using Gmail, ensure you've set up an App Password: [Learn how](https://support.google.com/accounts/answer/185833)")
+                                st.error("Email authentication failed. Check your email and app password.")
                             except Exception as e:
-                                st.error(f"Error sending emails: {str(e)}")
+                                error_msg = f"Error sending emails: {str(e)}"
+                                st.session_state.errors.append(error_msg)
+                                st.error(error_msg)
+        
+        # Navigation
+        if st.button("⬅️ Back to Design", use_container_width=True):
+            st.session_state.active_tab = 1
+            st.experimental_rerun()
 
-# Add custom CSS for better styling
+# Fix for the JSON error in the canvas code
+# In the Design tab, modify the canvas_html section by replacing:
+# const elements = {json.dumps(st.session_state.text_elements)};
+# with:
+# const elements = {json.dumps([e for e in st.session_state.text_elements])};
+
+# Add this custom CSS for the download button
 st.markdown("""
 <style>
 .download-button {
-    display: inline-block;
-    padding: 12px 24px;
     background-color: #4CAF50;
-    color: white !important;
-    text-decoration: none;
-    font-weight: bold;
-    border-radius: 4px;
+    border: none;
+    color: white;
+    padding: 12px 24px;
     text-align: center;
-    margin: 20px 0;
-}
-.download-button:hover {
-    background-color: #45a049;
-}
-.draggable-element {
-    transition: box-shadow 0.2s ease;
-}
-.draggable-element:hover {
-    box-shadow: 0 0 10px rgba(0,0,0,0.3);
-}
-.stApp {
-    max-width: 1200px;
-    margin: 0 auto;
+    text-decoration: none;
+    display: inline-block;
+    font-size: 16px;
+    margin: 4px 2px;
+    cursor: pointer;
+    border-radius: 8px;
+    width: 100%;
+    font-weight: bold;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# Fix for email upload persistence
-if 'excel_file' in st.session_state and excel_file is not None:
-    st.session_state.excel_file = excel_file
+# Display the active tab
+st.session_state.active_tab = tab_names.index(tabs[st.session_state.active_tab].label)
+
+# Clean up
+if st.session_state.certificates_generated and 'temp_dir' in locals():
+    try:
+        # Clean up temp files after a delay
+        for file in os.listdir(temp_dir):
+            os.remove(os.path.join(temp_dir, file))
+        os.rmdir(temp_dir)
+    except:
+        # Ignore cleanup errors
+        pass
