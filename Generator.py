@@ -4,6 +4,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import zipfile
 import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
+import ssl
 
 class CertificateDesigner:
     def __init__(self, root):
@@ -21,6 +26,9 @@ class CertificateDesigner:
         self.current_step = 1
         self.excel_headers = []
         self.canvas_scale = 1.0
+        self.email_column = ""
+        self.sender_email = ""
+        self.sender_password = ""
         
         # Create UI
         self.create_widgets()
@@ -51,6 +59,23 @@ class CertificateDesigner:
         # Excel headers preview
         self.headers_label = tk.Label(self.step1_frame, text="", wraplength=400)
         self.headers_label.pack(pady=10)
+        
+        # Email settings
+        email_frame = tk.Frame(self.step1_frame)
+        email_frame.pack(pady=10)
+        
+        tk.Label(email_frame, text="Email Column:").pack()
+        self.email_column_var = tk.StringVar()
+        self.email_dropdown = ttk.Combobox(email_frame, textvariable=self.email_column_var, state="readonly", width=25)
+        self.email_dropdown.pack()
+        
+        tk.Label(email_frame, text="Sender Email:").pack()
+        self.sender_email_entry = tk.Entry(email_frame, width=30)
+        self.sender_email_entry.pack()
+        
+        tk.Label(email_frame, text="App Password:").pack()
+        self.sender_password_entry = tk.Entry(email_frame, show="*", width=30)
+        self.sender_password_entry.pack()
         
         # Navigation buttons
         nav_frame1 = tk.Frame(self.step1_frame)
@@ -90,6 +115,22 @@ class CertificateDesigner:
             relief=tk.RAISED
         )
         self.generate_btn.pack(side=tk.RIGHT, padx=5)
+        
+        # SEND EMAILS BUTTON
+        self.send_btn = tk.Button(
+            top_panel,
+            text="SEND CERTIFICATES",
+            command=self.send_certificates,
+            state=tk.DISABLED,
+            bg="#2196F3",
+            fg="white",
+            font=('Arial', 12, 'bold'),
+            padx=20,
+            pady=10,
+            borderwidth=3,
+            relief=tk.RAISED
+        )
+        self.send_btn.pack(side=tk.RIGHT, padx=5)
         
         tk.Label(self.step2_frame, text="Step 2: Position Fields", font=('Arial', 14, 'bold')).pack(pady=10)
         
@@ -195,8 +236,10 @@ class CertificateDesigner:
                 self.excel_headers = [str(cell.value) for cell in sheet[1] if cell.value]
                 self.headers_label.config(text=f"Detected columns: {', '.join(self.excel_headers)}")
                 self.field_dropdown['values'] = self.excel_headers
+                self.email_dropdown['values'] = self.excel_headers
                 if self.excel_headers:
                     self.field_var.set(self.excel_headers[0])
+                    self.email_column_var.set(self.excel_headers[0])
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to read Excel file:\n{str(e)}")
             self.check_files_loaded()
@@ -347,58 +390,150 @@ class CertificateDesigner:
             output_dir = "certificates_output"
             os.makedirs(output_dir, exist_ok=True)
             
-            # Create ZIP file
-            zip_filename = os.path.join(output_dir, "certificates.zip")
+            # Clear existing files
+            for file in os.listdir(output_dir):
+                if file.endswith(".png"):
+                    os.remove(os.path.join(output_dir, file))
             
-            with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Generate certificates
+            for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=1):
+                # Create certificate from original template
+                img = Image.open(self.template_path)
+                draw = ImageDraw.Draw(img)
+                
+                # Add all text elements
+                for element in self.text_elements:
+                    field_name = element['field']
+                    try:
+                        if field_name in self.excel_headers:
+                            col_index = self.excel_headers.index(field_name)
+                            text = str(row[col_index]) if row[col_index] is not None else ""
+                        else:
+                            text = field_name  # Use as static text
+                        
+                        # Use original coordinates and font size
+                        font = ImageFont.truetype("arial.ttf", element['original_font_size'])
+                        draw.text(
+                            (element['original_x'], element['original_y']),
+                            text,
+                            fill=element['color'],
+                            font=font,
+                            anchor="mm"  # Center the text at the position
+                        )
+                    except Exception as e:
+                        print(f"Error processing field {field_name}: {str(e)}")
+                        continue
+                
+                # Save to file
+                filename = f"certificate_{row_idx}.png"
+                if self.excel_headers and row[0]:
+                    filename = f"{row[0]}_certificate.png"
+                
+                cert_path = os.path.join(output_dir, filename)
+                img.save(cert_path)
+            
+            messagebox.showinfo("Success", 
+                f"Certificates generated successfully!\n\n"
+                f"Saved to: {os.path.abspath(output_dir)}\n"
+                f"Number of certificates: {sheet.max_row - 1}"
+            )
+            
+            # Enable send button if email column is selected
+            if self.email_column_var.get():
+                self.send_btn.config(state=tk.NORMAL)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate certificates:\n{str(e)}")
+    
+    def send_certificates(self):
+        self.email_column = self.email_column_var.get()
+        self.sender_email = self.sender_email_entry.get()
+        self.sender_password = self.sender_password_entry.get()
+        
+        if not self.email_column:
+            messagebox.showerror("Error", "Please select an email column")
+            return
+            
+        if not self.sender_email or not self.sender_password:
+            messagebox.showerror("Error", "Please enter sender email and password")
+            return
+            
+        try:
+            # Load Excel data
+            wb = openpyxl.load_workbook(self.excel_path)
+            sheet = wb.active
+            
+            # Get email column index
+            email_col_index = self.excel_headers.index(self.email_column)
+            
+            # Set up SMTP server
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+                server.login(self.sender_email, self.sender_password)
+                
+                # Track sent emails
+                sent_count = 0
+                failed_emails = []
+                
                 for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=1):
-                    # Create certificate from original template
-                    img = Image.open(self.template_path)
-                    draw = ImageDraw.Draw(img)
+                    recipient_email = str(row[email_col_index]) if row[email_col_index] else None
                     
-                    # Add all text elements
-                    for element in self.text_elements:
-                        field_name = element['field']
-                        try:
-                            if field_name in self.excel_headers:
-                                col_index = self.excel_headers.index(field_name)
-                                text = str(row[col_index]) if row[col_index] is not None else ""
-                            else:
-                                text = field_name  # Use as static text
-                            
-                            # Use original coordinates and font size
-                            font = ImageFont.truetype("arial.ttf", element['original_font_size'])
-                            draw.text(
-                                (element['original_x'], element['original_y']),
-                                text,
-                                fill=element['color'],
-                                font=font,
-                                anchor="mm"  # Center the text at the position
-                            )
-                        except Exception as e:
-                            print(f"Error processing field {field_name}: {str(e)}")
-                            continue
+                    if not recipient_email or "@" not in recipient_email:
+                        failed_emails.append(f"Row {row_idx}: Invalid email")
+                        continue
                     
-                    # Save to file
+                    # Find certificate file
                     filename = f"certificate_{row_idx}.png"
                     if self.excel_headers and row[0]:
                         filename = f"{row[0]}_certificate.png"
                     
-                    cert_path = os.path.join(output_dir, filename)
-                    img.save(cert_path)
+                    cert_path = os.path.join("certificates_output", filename)
                     
-                    # Add to ZIP
-                    zipf.write(cert_path, filename)
-                    os.remove(cert_path)
-            
-            messagebox.showinfo("Success", 
-                f"Certificates generated successfully!\n\n"
-                f"Saved to: {os.path.abspath(zip_filename)}\n"
-                f"Number of certificates: {sheet.max_row - 1}"
-            )
-            
+                    if not os.path.exists(cert_path):
+                        failed_emails.append(f"Row {row_idx}: Certificate not found")
+                        continue
+                    
+                    # Create email
+                    msg = MIMEMultipart()
+                    msg['From'] = self.sender_email
+                    msg['To'] = recipient_email
+                    msg['Subject'] = "Your Certificate"
+                    
+                    # Email body
+                    body = """\
+                    <html>
+                      <body>
+                        <p>Dear Participant,</p>
+                        <p>Please find attached your certificate.</p>
+                        <p>Best regards,<br>
+                        Certificate Team</p>
+                      </body>
+                    </html>
+                    """
+                    msg.attach(MIMEText(body, 'html'))
+                    
+                    # Attach certificate
+                    with open(cert_path, "rb") as attachment:
+                        part = MIMEApplication(attachment.read(), Name=os.path.basename(cert_path))
+                        part['Content-Disposition'] = f'attachment; filename="{os.path.basename(cert_path)}"'
+                        msg.attach(part)
+                    
+                    # Send email
+                    try:
+                        server.sendmail(self.sender_email, recipient_email, msg.as_string())
+                        sent_count += 1
+                    except Exception as e:
+                        failed_emails.append(f"Row {row_idx}: {str(e)}")
+                
+                # Show results
+                result_message = f"Successfully sent {sent_count} certificates"
+                if failed_emails:
+                    result_message += f"\n\nFailed to send to:\n" + "\n".join(failed_emails)
+                
+                messagebox.showinfo("Email Results", result_message)
+                
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to generate certificates:\n{str(e)}")
+            messagebox.showerror("Error", f"Failed to send emails:\n{str(e)}")
 
 if __name__ == "__main__":
     root = tk.Tk()
