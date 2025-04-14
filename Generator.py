@@ -1,7 +1,7 @@
 import openpyxl
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 import zipfile
 import os
 
@@ -109,7 +109,7 @@ class CertificateDesigner:
         field_frame.pack(fill=tk.X, pady=5)
         tk.Label(field_frame, text="Field:").pack(side=tk.LEFT)
         self.field_var = tk.StringVar()
-        self.field_dropdown = tk.messagebox(field_frame, textvariable=self.field_var, state="readonly", width=18)
+        self.field_dropdown = ttk.Combobox(field_frame, textvariable=self.field_var, state="readonly", width=18)
         self.field_dropdown.pack(side=tk.LEFT, padx=5)
         
         # Font size
